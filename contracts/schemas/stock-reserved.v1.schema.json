@@ -28,11 +28,11 @@
     "payload": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["reservationId", "sku", "qty", "lots"],
+      "required": ["reservationId", "sku", "quantity", "lots"],
       "properties": {
         "reservationId": { "type": "string", "format": "uuid" },
         "sku": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "qty": { "type": "integer", "minimum": 1, "description": "Unidades reservadas en total." },
+        "quantity": { "type": "integer", "minimum": 1, "description": "Unidades reservadas en total." },
         "lots": {
           "type": "array",
           "minItems": 1,
