@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  workflow_dispatch:          # ejecucion manual: habilita los jobs que necesitan infraestructura (package/deploy/sat/zap)
 
 permissions:
   contents: read
@@ -61,6 +62,9 @@ jobs:
           # Excepciones aceptadas con justificacion: .trivyignore (CVE, motivo, responsable, fecha)
 
   package:                            # Gate 4: imagen inmutable, SBOM y escaneo de imagen
+    # NECESITA INFRA: publica en ghcr.io (packages: write). En un repositorio recien creado/publico no corre en cada
+    # PR: solo manualmente (workflow_dispatch) o al etiquetar una version (tag v*).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     needs: [secrets-scan, build-test, sast, sca]
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write }
@@ -93,7 +97,8 @@ jobs:
           format: cyclonedx-json
 
   deploy-staging:                     # Gate 5: despliegue + smoke + rollback automatico
-    if: github.ref == 'refs/heads/main'
+    # NECESITA INFRA Y SECRETOS (STAGING_DEPLOY_HOOK, STAGING_URL, STAGING_OPS_KEY, entorno `staging`): solo manual.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: package
     runs-on: ubuntu-latest
     environment: staging              # secretos del entorno, no del repo
@@ -131,6 +136,8 @@ jobs:
           exit 1
 
   dast-sat:                           # Gate 6: DAST (ZAP baseline) + SAT contra staging
+    # NECESITA un staging desplegado (STAGING_URL y claves): corre solo si deploy-staging corrio (ejecucion manual).
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: deploy-staging
     runs-on: ubuntu-latest
     steps:
@@ -154,6 +161,7 @@ jobs:
         with: { name: dast-report, path: report_html.html }
 
   release:                            # Gate 7: tag semver + changelog + evidencia
+    # NECESITA el entorno protegido `production-approval` (aprobacion manual): solo al etiquetar una version.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: package
     runs-on: ubuntu-latest

@@ -3,3 +3,8 @@ target/
 *.iml
 .env
 *.log
+node_modules/
+.compat-tmp/
+evidencias/
+dist/
+contracts-docs/
