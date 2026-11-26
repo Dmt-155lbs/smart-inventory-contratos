@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Patron Outbox: escribe el evento en la MISMA transaccion que el cambio de dominio.
  * MANDATORY impide usarlo fuera de una transaccion (sino se perderia la garantia).
+ * El sobre generado cumple contracts/schemas/*.schema.json (lo verifica EventContractTest).
  */
 @Component
 public class OutboxWriter {
@@ -30,19 +31,28 @@ public class OutboxWriter {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public UUID append(String routingKey, String correlationId, Map<String, Object> payload) {
+    public UUID append(DomainEvent event, String correlationId, Map<String, Object> payload) {
         UUID eventId = UUID.randomUUID();
-        var envelope = new EventEnvelope(eventId, routingKey, 1, clock.instant(),
-                correlationId != null ? correlationId : MDC.get("requestId"), "smart-inventory", payload);
+        var envelope = new EventEnvelope(eventId, event.eventType(), DomainEvent.SCHEMA_VERSION, clock.instant(),
+                asUuid(correlationId != null ? correlationId : MDC.get("requestId")), event.producer(), payload);
         try {
             jdbc.update("""
                     insert into outbox (id, event_type, routing_key, payload, correlation_id, occurred_at)
                     values (?, ?, ?, ?::jsonb, ?, ?)""",
-                    eventId, routingKey, routingKey, mapper.writeValueAsString(envelope),
+                    eventId, event.eventType(), event.routingKey(), mapper.writeValueAsString(envelope),
                     envelope.correlationId(), Timestamp.from(envelope.occurredAt()));
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot serialize event " + routingKey, e);
+            throw new IllegalStateException("Cannot serialize event " + event.eventType(), e);
         }
         return eventId;
+    }
+
+    /** El contrato exige correlationId UUID: si no hay uno valido (p. ej. tarea sin request) se genera. */
+    private static String asUuid(String candidate) {
+        try {
+            return candidate == null ? UUID.randomUUID().toString() : UUID.fromString(candidate).toString();
+        } catch (IllegalArgumentException e) {
+            return UUID.randomUUID().toString();
+        }
     }
 }

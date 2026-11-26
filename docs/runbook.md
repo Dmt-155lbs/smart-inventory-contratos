@@ -8,7 +8,7 @@
 - Alcance: ¿un SKU o todos? Si solo falta uno, sospechar de un mensaje envenenado; si faltan todos, del broker o del consumidor.
 
 ## 2. Diagnóstico (en este orden; **no purgar mensajes como primer paso**)
-1. **Correlación:** tomar el `requestId` de la reserva (cabecera `X-Request-Id` de la respuesta) y buscarlo en los logs JSON: debe aparecer en la API, en el publicador del outbox y en `DashboardConsumer`. El último servicio donde aparece indica dónde se detuvo.
+1. **Correlación:** tomar el `correlationId` de la reserva (cabecera `X-Request-Id` de la respuesta) y buscarlo en los logs JSON: debe aparecer en la API, en el publicador del outbox y en `DashboardConsumer`. El último servicio donde aparece indica dónde se detuvo.
 2. **Salud de dependencias:** `GET /actuator/health/readiness` (DB y broker).
 3. **Outbox:** `select count(*) from outbox where published_at is null;` o la métrica `smartinventory_outbox_pending`. Si crece → el publicador no llega al broker.
 4. **Broker:** consola `:15672`: profundidad y antigüedad de `dashboard.q` / `replenishment.q`, tasa de reintentos y contenido de `inventory.dlq`.

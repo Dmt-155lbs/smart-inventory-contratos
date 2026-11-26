@@ -20,6 +20,8 @@
     <java.version>21</java.version>
     <springdoc.version>2.6.0</springdoc.version>
     <swagger-parser.version>2.1.22</swagger-parser.version>
+    <swagger-request-validator.version>2.44.9</swagger-request-validator.version>
+    <json-schema-validator.version>1.5.6</json-schema-validator.version>
   </properties>
 
   <dependencies>
@@ -44,6 +46,9 @@
     <dependency><groupId>org.testcontainers</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.testcontainers</groupId><artifactId>postgresql</artifactId><scope>test</scope></dependency>
     <dependency><groupId>io.swagger.parser.v3</groupId><artifactId>swagger-parser</artifactId><version>${swagger-parser.version}</version><scope>test</scope></dependency>
+    <!-- Pruebas de contrato: peticiones/respuestas HTTP contra contracts/openapi.yaml y eventos contra JSON Schema -->
+    <dependency><groupId>com.atlassian.oai</groupId><artifactId>swagger-request-validator-mockmvc</artifactId><version>${swagger-request-validator.version}</version><scope>test</scope></dependency>
+    <dependency><groupId>com.networknt</groupId><artifactId>json-schema-validator</artifactId><version>${json-schema-validator.version}</version><scope>test</scope></dependency>
   </dependencies>
 
   <build>
