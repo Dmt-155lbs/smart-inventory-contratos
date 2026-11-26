@@ -65,7 +65,7 @@ class ReservationFlowIT {
         var result = service.reserve(cmd("IT-OUTBOX", "key-outbox-1", 4));
         assertEquals(4, reserved("IT-OUTBOX"));
         int events = jdbc.queryForObject(
-                "select count(*) from outbox where routing_key = 'inventory.stock-reserved.v1' and payload->'payload'->>'reservationId' = ?",
+                "select count(*) from outbox where routing_key = 'inventory.stock-reserved.v1' and payload->'payload'->>'reservationId' = ?",  // gitleaks:allow (routing key, no es un secreto)
                 Integer.class, result.reservationId().toString());
         assertEquals(1, events);
     }
