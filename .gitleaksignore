@@ -1,0 +1,2 @@
+# Falso positivo: routing key de RabbitMQ en una consulta SQL de prueba, no es un secreto
+f77b1a8187ed26193d6c258383382870c841d53d:src/test/java/ec/usfq/smartinventory/ReservationFlowIT.java:generic-api-key:68

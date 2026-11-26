@@ -2,7 +2,7 @@ package ec.usfq.smartinventory.application;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import ec.usfq.smartinventory.config.RabbitConfig;
+import ec.usfq.smartinventory.messaging.DomainEvent;
 import ec.usfq.smartinventory.domain.Allocation;
 import ec.usfq.smartinventory.domain.AllocationPolicy;
 import ec.usfq.smartinventory.domain.Batch;
@@ -112,14 +112,31 @@ public class ReservationService {
         Result result = new Result(reservationId, cmd.sku(), cmd.location(), cmd.quantity(),
                 cmd.destination(), "CONFIRMED", lines, false);
 
-        outbox.append(RabbitConfig.STOCK_RESERVED, cmd.correlationId(), Map.of(
-                "reservationId", reservationId.toString(), "sku", cmd.sku(), "location", cmd.location(),
-                "quantity", cmd.quantity(), "destination", cmd.destination(),
-                "lines", lines.stream().map(l -> Map.of("lotCode", l.lotCode(), "quantity", l.quantity())).toList()));
+        // Payload del contrato inventory.stock-reserved.v1 (contracts/schemas/stock-reserved.v1.schema.json)
+        outbox.append(DomainEvent.STOCK_RESERVED, cmd.correlationId(), EventPayloads.stockReserved(
+                reservationId, cmd.sku(), cmd.location(), cmd.quantity(), cmd.destination(), lines));
 
         jdbc.update("update idempotency_key set response = ?::jsonb where key = ?", toJson(result), key);
         metrics.counter("smartinventory.reservations", "result", "created").increment();
         return result;
+    }
+
+    /** GET /api/v1/reservations/{id}: recurso apuntado por la cabecera Location del 201. */
+    @Transactional(readOnly = true)
+    public Result find(UUID id) {
+        var head = jdbc.query("select sku, location, quantity, destination, status from reservation where id = ?",
+                (rs, i) -> new Result(id, rs.getString("sku"), rs.getString("location"), rs.getInt("quantity"),
+                        rs.getString("destination"), rs.getString("status"), List.of(), false), id);
+        if (head.isEmpty()) {
+            throw ApiException.notFound("Reservation " + id + " not found");
+        }
+        List<Line> lines = jdbc.query("""
+                select rl.lot_code, b.expires_on, rl.quantity from reservation_line rl
+                join batch b on b.id = rl.batch_id where rl.reservation_id = ? order by b.expires_on, b.id""",
+                (rs, i) -> new Line(rs.getString("lot_code"), rs.getDate("expires_on").toLocalDate(), rs.getInt("quantity")),
+                id);
+        var r = head.get(0);
+        return new Result(id, r.sku(), r.location(), r.quantity(), r.destination(), r.status(), lines, false);
     }
 
     private Result replay(String key, String hash) {

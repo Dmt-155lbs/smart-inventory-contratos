@@ -1,0 +1,428 @@
+asyncapi: 3.0.0
+info:
+  title: Smart Inventory - Eventos de negocio
+  version: 1.0.0
+  description: |
+    Contrato asincrono (RabbitMQ / AMQP 0-9-1) de Smart Inventory. Fuente unica de verdad de los eventos; los
+    payloads se definen en JSON Schema (draft 2020-12) bajo `contracts/schemas/` y se validan en la CI y en
+    `EventContractTest`.
+
+    ## Version del documento vs version del evento
+    `info.version` (**1.0.0**) versiona **este documento**. La version del **evento** va en la routing key (`.v1`),
+    en `eventType` y en `schemaVersion` (semver) del sobre. Agregar un campo opcional => `schemaVersion` 1.1.0 y el
+    evento sigue siendo v1; romper el contrato => `*.v2` nuevo con convivencia (ver `contracts/COMPATIBILITY.md`).
+
+    ## Eventos
+    | Evento | Routing key | Emisor | Consumidores |
+    |---|---|---|---|
+    | `inventory.stock-reserved` | `inventory.stock-reserved.v1` | inventory-service | dashboard (`dashboard.q`), replenishment (`replenishment.q`) |
+    | `replenishment.risk-detected` | `replenishment.risk-detected.v1` | replenishment-service | purchasing (`purchasing.risk.q`, equipo externo) |
+
+    ## Sobre (envelope) comun
+    `eventId` (uuid), `eventType`, `schemaVersion` (semver string), `occurredAt` (ISO-8601 UTC), `correlationId` (uuid,
+    igual al `X-Request-Id` HTTP), `producer` y `payload`.
+
+    ## Garantias de entrega
+    - **Productor (Outbox transaccional):** el evento se escribe en la tabla `outbox` en la misma transaccion que el cambio
+      de dominio; `OutboxPublisher` publica con **publisher confirms** (`publisher-confirm-type: correlated`, espera
+      el confirm hasta 5 s) y solo entonces marca `published_at`. Si no hay confirm, reintenta en el siguiente poll
+      (500 ms). Es **al-menos-una-vez**: pueden llegar duplicados.
+    - **Consumidor:** ack **automatico** tras terminar el listener (la transaccion de BD hace commit antes del ack).
+      Deduplica por `(consumer, eventId)` en `processed_event`. Ante excepcion: **3 intentos** en proceso con backoff
+      exponencial (1 s, 2 s; multiplicador 2, maximo 10 s). Agotados => **nack sin requeue** (`default-requeue-rejected=false`)
+      => se dead-letterea al DLX `inventory.dlx` (direct, routing key `dead`) => cola `inventory.dlq`
+      (TTL de retencion 7 dias). Un mensaje ilegible (JSON invalido) sigue la misma ruta.
+
+    ## Migracion de routing keys (coexistencia)
+    Las routing keys anteriores (`inventory.stock-reserved`, `replenishment.suggestion-opened`) siguen publicandose mientras
+    `smartinventory.events.legacy-routing-keys.enabled=true` (por defecto durante la migracion), con el sobre legado
+    (`schemaVersion` entero 1, payload anterior). Las colas propias estan enlazadas a ambas claves; el consumidor deduplica
+    por `eventId`. Plan de retiro en `contracts/COMPATIBILITY.md`.
+  contact:
+    name: Equipo Smart Inventory (USFQ)
+defaultContentType: application/json
+servers:
+  rabbitmq:
+    host: localhost:5672
+    protocol: amqp
+    protocolVersion: 0-9-1
+    description: Broker RabbitMQ de desarrollo (docker compose). vhost `/`.
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+channels:
+  stockReserved:
+    address: inventory.stock-reserved.v1
+    title: Reserva de stock confirmada (routing key)
+    description: Routing key publicada en el exchange `smartinventory.events`.
+    messages:
+      stockReserved:
+        $ref: '#/components/messages/StockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: routingKey
+        exchange:
+          name: smartinventory.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+  riskDetected:
+    address: replenishment.risk-detected.v1
+    title: Riesgo de desabastecimiento detectado (routing key)
+    messages:
+      riskDetected:
+        $ref: '#/components/messages/RiskDetected'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: routingKey
+        exchange:
+          name: smartinventory.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+  legacyStockReserved:
+    address: inventory.stock-reserved
+    title: DEPRECADO - routing key anterior de stock-reserved
+    description: |
+      **Deprecado.** Solo se publica con `smartinventory.events.legacy-routing-keys.enabled=true`. Payload y sobre
+      anteriores (`schemaVersion` entero, `quantity`, `lines`). Se retira al terminar la ventana de migracion.
+    messages:
+      legacyStockReserved:
+        $ref: '#/components/messages/LegacyStockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: routingKey
+        exchange:
+          name: smartinventory.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+    x-deprecated: true
+  legacySuggestionOpened:
+    address: replenishment.suggestion-opened
+    title: DEPRECADO - routing key anterior de risk-detected
+    description: |
+      **Deprecado.** Equivalente anterior de `replenishment.risk-detected.v1`; mismo `payload` ampliado
+      (`suggestionId`, `sku`, `suggestedQty` + campos nuevos que los consumidores legados ignoran).
+    messages:
+      legacySuggestionOpened:
+        $ref: '#/components/messages/LegacySuggestionOpened'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: routingKey
+        exchange:
+          name: smartinventory.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+    x-deprecated: true
+  dashboardQueue:
+    address: dashboard.q
+    title: Cola del consumidor dashboard
+    description: Enlazada a `inventory.stock-reserved.v1` (y a la clave legada durante la migracion).
+    messages:
+      stockReserved:
+        $ref: '#/components/messages/StockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: queue
+        queue:
+          name: dashboard.q
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+    x-bindings-to-exchange:
+      exchange: smartinventory.events
+      routingKeys: [inventory.stock-reserved.v1, inventory.stock-reserved]
+    x-dead-letter: { exchange: inventory.dlx, routingKey: dead }
+  replenishmentQueue:
+    address: replenishment.q
+    title: Cola del consumidor replenishment
+    description: Enlazada a `inventory.stock-reserved.v1` (y a la clave legada durante la migracion).
+    messages:
+      stockReserved:
+        $ref: '#/components/messages/StockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: queue
+        queue:
+          name: replenishment.q
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+    x-bindings-to-exchange:
+      exchange: smartinventory.events
+      routingKeys: [inventory.stock-reserved.v1, inventory.stock-reserved]
+    x-dead-letter: { exchange: inventory.dlx, routingKey: dead }
+  purchasingRiskQueue:
+    address: purchasing.risk.q
+    title: Cola del consumidor externo purchasing
+    description: |
+      Cola declarada por el productor para el equipo de compras (consumidor externo; no hay listener en este repositorio).
+      Acotada (TTL 24 h, 10 000 mensajes, `drop-head`) para que no crezca sin limite si nadie consume.
+    messages:
+      riskDetected:
+        $ref: '#/components/messages/RiskDetected'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: queue
+        queue:
+          name: purchasing.risk.q
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+    x-bindings-to-exchange:
+      exchange: smartinventory.events
+      routingKeys: [replenishment.risk-detected.v1, replenishment.suggestion-opened]
+    x-dead-letter: { exchange: inventory.dlx, routingKey: dead }
+  deadLetterQueue:
+    address: inventory.dlq
+    title: Cola de mensajes muertos (DLQ)
+    description: |
+      Recibe, via el DLX `inventory.dlx` (direct, routing key `dead`), los mensajes rechazados tras agotar los reintentos.
+      Retencion 7 dias (`x-message-ttl`). Se reprocesan manualmente (ver `docs/runbook.md`).
+    messages:
+      deadLetter:
+        $ref: '#/components/messages/DeadLetter'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        is: queue
+        queue:
+          name: inventory.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+    x-bindings-to-exchange:
+      exchange: inventory.dlx
+      exchangeType: direct
+      routingKeys: [dead]
+operations:
+  publishStockReserved:
+    action: send
+    title: inventory-service publica inventory.stock-reserved.v1
+    summary: Emitido al confirmar una reserva (POST /api/v1/reservations).
+    channel: { $ref: '#/channels/stockReserved' }
+    messages:
+      - $ref: '#/channels/stockReserved/messages/stockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        deliveryMode: 2
+        mandatory: false
+    x-emitter: inventory-service
+    x-reliability:
+      pattern: transactional-outbox
+      publisherConfirms: correlated
+      confirmTimeoutMs: 5000
+      deliveryGuarantee: at-least-once
+      onNoConfirm: la fila de outbox sigue pendiente y se reintenta en el siguiente poll (500 ms)
+  publishRiskDetected:
+    action: send
+    title: replenishment-service publica replenishment.risk-detected.v1
+    summary: Emitido cuando se abre una sugerencia de reposicion (consumo de stock-reserved bajo el punto de reorden).
+    channel: { $ref: '#/channels/riskDetected' }
+    messages:
+      - $ref: '#/channels/riskDetected/messages/riskDetected'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        deliveryMode: 2
+        mandatory: false
+    x-emitter: replenishment-service
+    x-reliability:
+      pattern: transactional-outbox
+      publisherConfirms: correlated
+      confirmTimeoutMs: 5000
+      deliveryGuarantee: at-least-once
+  publishLegacyStockReserved:
+    action: send
+    title: (deprecado) copia con routing key anterior
+    channel: { $ref: '#/channels/legacyStockReserved' }
+    messages:
+      - $ref: '#/channels/legacyStockReserved/messages/legacyStockReserved'
+    x-deprecated: true
+    x-feature-flag: smartinventory.events.legacy-routing-keys.enabled
+  publishLegacySuggestionOpened:
+    action: send
+    title: (deprecado) copia con routing key anterior
+    channel: { $ref: '#/channels/legacySuggestionOpened' }
+    messages:
+      - $ref: '#/channels/legacySuggestionOpened/messages/legacySuggestionOpened'
+    x-deprecated: true
+    x-feature-flag: smartinventory.events.legacy-routing-keys.enabled
+  consumeStockReservedDashboard:
+    action: receive
+    title: dashboard consume inventory.stock-reserved.v1
+    summary: Actualiza dashboard_view (US-04).
+    channel: { $ref: '#/channels/dashboardQueue' }
+    messages:
+      - $ref: '#/channels/dashboardQueue/messages/stockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        ack: true
+    x-consumer: dashboard
+    x-consumer-policy: &consumerPolicy
+      ack: automatic after the listener returns (DB commit happens first)
+      idempotency: (consumer, eventId) in processed_event
+      retry:
+        maxAttempts: 3
+        initialInterval: 1s
+        multiplier: 2.0
+        maxInterval: 10s
+      onExhausted: nack requeue=false -> DLX inventory.dlx (direct, key "dead") -> inventory.dlq
+      prefetch: 10
+      concurrency: 2-4
+  consumeStockReservedReplenishment:
+    action: receive
+    title: replenishment consume inventory.stock-reserved.v1
+    summary: Evalua el punto de reorden y abre (como maximo) una sugerencia por SKU (US-03); puede emitir risk-detected.
+    channel: { $ref: '#/channels/replenishmentQueue' }
+    messages:
+      - $ref: '#/channels/replenishmentQueue/messages/stockReserved'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        ack: true
+    x-consumer: replenishment
+    x-consumer-policy: *consumerPolicy
+  consumeRiskDetectedPurchasing:
+    action: receive
+    title: purchasing (externo) consume replenishment.risk-detected.v1
+    channel: { $ref: '#/channels/purchasingRiskQueue' }
+    messages:
+      - $ref: '#/channels/purchasingRiskQueue/messages/riskDetected'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        ack: true
+    x-consumer: purchasing
+    x-consumer-policy: *consumerPolicy
+  inspectDeadLetters:
+    action: receive
+    title: operaciones inspecciona la DLQ
+    channel: { $ref: '#/channels/deadLetterQueue' }
+    messages:
+      - $ref: '#/channels/deadLetterQueue/messages/deadLetter'
+    bindings:
+      amqp:
+        bindingVersion: 0.3.0
+        ack: true
+components:
+  messages:
+    StockReserved:
+      name: inventory.stock-reserved
+      title: Stock reservado (v1)
+      summary: Una reserva FEFO fue confirmada.
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      bindings:
+        amqp:
+          bindingVersion: 0.3.0
+          contentEncoding: utf-8
+          messageType: inventory.stock-reserved
+      payload:
+        schemaFormat: application/schema+json;version=draft-07
+        schema:
+          $ref: './schemas/stock-reserved.v1.schema.json'
+      examples:
+        - name: reserva-dos-lotes
+          payload:
+            $ref: './examples/stock-reserved.v1.json'
+    RiskDetected:
+      name: replenishment.risk-detected
+      title: Riesgo de desabastecimiento detectado (v1)
+      summary: El disponible de un SKU cayo bajo su punto de reorden.
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      bindings:
+        amqp:
+          bindingVersion: 0.3.0
+          contentEncoding: utf-8
+          messageType: replenishment.risk-detected
+      payload:
+        schemaFormat: application/schema+json;version=draft-07
+        schema:
+          $ref: './schemas/replenishment-risk-detected.v1.schema.json'
+      examples:
+        - name: riesgo-medio
+          payload:
+            $ref: './examples/replenishment-risk-detected.v1.json'
+    LegacyStockReserved:
+      name: inventory.stock-reserved (legado)
+      title: DEPRECADO - stock-reserved sobre anterior
+      contentType: application/json
+      payload:
+        type: object
+        required: [eventId, eventType, schemaVersion, occurredAt, correlationId, producer, payload]
+        properties:
+          eventId: { type: string, format: uuid }
+          eventType: { type: string, const: inventory.stock-reserved }
+          schemaVersion: { type: integer, const: 1 }
+          occurredAt: { type: string, format: date-time }
+          correlationId: { type: string }
+          producer: { type: string, const: smart-inventory }
+          payload:
+            type: object
+            required: [reservationId, sku, location, quantity, destination, lines]
+            properties:
+              reservationId: { type: string, format: uuid }
+              sku: { type: string }
+              location: { type: string }
+              quantity: { type: integer }
+              destination: { type: string }
+              lines:
+                type: array
+                items:
+                  type: object
+                  required: [lotCode, quantity]
+                  properties:
+                    lotCode: { type: string }
+                    quantity: { type: integer }
+    LegacySuggestionOpened:
+      name: replenishment.suggestion-opened (legado)
+      title: DEPRECADO - suggestion-opened sobre anterior
+      contentType: application/json
+      payload:
+        type: object
+        required: [eventId, eventType, schemaVersion, occurredAt, correlationId, producer, payload]
+        properties:
+          eventId: { type: string, format: uuid }
+          eventType: { type: string, const: replenishment.suggestion-opened }
+          schemaVersion: { type: integer, const: 1 }
+          occurredAt: { type: string, format: date-time }
+          correlationId: { type: string }
+          producer: { type: string, const: smart-inventory }
+          payload:
+            type: object
+            required: [suggestionId, sku, suggestedQty]
+            properties:
+              suggestionId: { type: string, format: uuid }
+              sku: { type: string }
+              suggestedQty: { type: integer }
+    DeadLetter:
+      name: dead-letter
+      title: Mensaje original rechazado
+      summary: El mensaje original sin cambios, con las cabeceras `x-death` que anade RabbitMQ.
+      contentType: application/json
+      payload:
+        type: object
+        description: Cualquiera de los eventos anteriores (o un cuerpo ilegible).

@@ -84,3 +84,11 @@ app:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+
+# Migracion de contrato de eventos (contracts/COMPATIBILITY.md): mientras sea true tambien se publica con las
+# routing keys anteriores (inventory.stock-reserved, replenishment.suggestion-opened) y las colas siguen enlazadas a ellas.
+# Pasar a false al terminar la ventana de convivencia y retirar el codigo legado.
+smartinventory:
+  events:
+    legacy-routing-keys:
+      enabled: ${LEGACY_ROUTING_KEYS_ENABLED:true}

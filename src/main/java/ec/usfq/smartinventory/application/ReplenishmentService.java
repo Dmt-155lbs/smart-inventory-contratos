@@ -1,6 +1,6 @@
 package ec.usfq.smartinventory.application;
 
-import ec.usfq.smartinventory.config.RabbitConfig;
+import ec.usfq.smartinventory.messaging.DomainEvent;
 import ec.usfq.smartinventory.messaging.OutboxWriter;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -59,7 +59,7 @@ public class ReplenishmentService {
         var view = jdbc.queryForObject("""
                 select id, sku, supplier, suggested_qty, status, created_at, approved_by, approved_at
                 from replenishment_suggestion where id = ?""", (rs, i) -> view(rs), id);
-        outbox.append(RabbitConfig.SUGGESTION_APPROVED, correlationId,
+        outbox.append(DomainEvent.SUGGESTION_APPROVED, correlationId,
                 Map.of("suggestionId", id.toString(), "sku", view.sku(), "approvedBy", approver));
         return view;
     }

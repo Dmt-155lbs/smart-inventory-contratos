@@ -41,7 +41,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
         if (!d.allowed()) {
             metrics.counter("smartinventory.ratelimit.rejected", "client", client).increment();
             resp.setHeader("Retry-After", String.valueOf(d.retryAfterSeconds()));
-            problems.write(resp, 429, "RATE_LIMITED", "Too many requests; retry after " + d.retryAfterSeconds() + "s");
+            problems.write(req, resp, 429, "RATE_LIMITED", "Too many requests; retry after " + d.retryAfterSeconds() + "s");
             return;
         }
         chain.doFilter(req, resp);

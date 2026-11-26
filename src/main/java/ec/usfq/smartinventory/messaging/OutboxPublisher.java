@@ -8,6 +8,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -28,11 +29,17 @@ public class OutboxPublisher {
     private final JdbcTemplate jdbc;
     private final RabbitTemplate rabbit;
     private final TransactionTemplate tx;
+    private final LegacyEventAdapter legacy;
+    private final boolean legacyKeysEnabled;
 
-    public OutboxPublisher(JdbcTemplate jdbc, RabbitTemplate rabbit, TransactionTemplate tx, MeterRegistry metrics) {
+    public OutboxPublisher(JdbcTemplate jdbc, RabbitTemplate rabbit, TransactionTemplate tx, MeterRegistry metrics,
+                           LegacyEventAdapter legacy,
+                           @Value("${smartinventory.events.legacy-routing-keys.enabled:true}") boolean legacyKeysEnabled) {
         this.jdbc = jdbc;
         this.rabbit = rabbit;
         this.tx = tx;
+        this.legacy = legacy;
+        this.legacyKeysEnabled = legacyKeysEnabled;
         Gauge.builder("smartinventory.outbox.pending", this, OutboxPublisher::pendingCount)
                 .description("Eventos en outbox sin publicar").register(metrics);
     }
@@ -62,17 +69,28 @@ public class OutboxPublisher {
     }
 
     private void publish(Map<String, Object> row) {
+        String routingKey = (String) row.get("routing_key");
+        String json = (String) row.get("payload");
         rabbit.invoke(ops -> {
-            ops.convertAndSend(RabbitConfig.EVENTS_EXCHANGE, (String) row.get("routing_key"),
-                    (Object) row.get("payload"), message -> {
-                        var p = message.getMessageProperties();
-                        p.setContentType("application/json");
-                        p.setMessageId(String.valueOf(row.get("id")));
-                        p.setCorrelationId((String) row.get("correlation_id"));
-                        return message;
-                    });
+            send(ops, routingKey, json, row);
+            // Migracion: misma entrega tambien con la routing key anterior y el sobre anterior
+            if (legacyKeysEnabled) {
+                DomainEvent.byRoutingKey(routingKey).ifPresent(ev -> ev.legacyRoutingKey().ifPresent(legacyKey ->
+                        send(ops, legacyKey, legacy.toLegacy(ev, legacyKey, json), row)));
+            }
             ops.waitForConfirmsOrDie(5_000);
             return true;
+        });
+    }
+
+    private static void send(org.springframework.amqp.rabbit.core.RabbitOperations ops, String routingKey,
+                             String json, Map<String, Object> row) {
+        ops.convertAndSend(RabbitConfig.EVENTS_EXCHANGE, routingKey, (Object) json, message -> {
+            var p = message.getMessageProperties();
+            p.setContentType("application/json");
+            p.setMessageId(String.valueOf(row.get("id")));   // = eventId: ambas copias comparten id (dedupe)
+            p.setCorrelationId((String) row.get("correlation_id"));
+            return message;
         });
     }
 }

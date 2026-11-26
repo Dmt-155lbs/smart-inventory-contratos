@@ -8,9 +8,13 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.net.URI;
+import java.util.UUID;
 import org.slf4j.MDC;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -45,8 +49,14 @@ public class ReservationController {
                 idempotencyKey, body.sku(), body.location(), body.quantity(), body.destination(),
                 MDC.get(CorrelationIdFilter.MDC_KEY));
         var result = service.reserve(cmd);
+        URI location = URI.create("/api/v1/reservations/" + result.reservationId());
         return result.replay()
-                ? ResponseEntity.ok().header("Idempotent-Replay", "true").body(result)
-                : ResponseEntity.status(201).body(result);
+                ? ResponseEntity.ok().header("Idempotent-Replay", "true").location(location).body(result)
+                : ResponseEntity.created(location).body(result);
+    }
+
+    @GetMapping("/{id}")
+    public ReservationService.Result get(@PathVariable UUID id) {
+        return service.find(id);
     }
 }

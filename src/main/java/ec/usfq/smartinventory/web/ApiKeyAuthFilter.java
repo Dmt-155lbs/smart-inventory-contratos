@@ -46,12 +46,12 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
                 .findFirst();
         if (match.isEmpty()) {
             resp.setHeader("WWW-Authenticate", "ApiKey realm=\"smart-inventory\"");
-            problems.write(resp, 401, "UNAUTHENTICATED", "Missing or invalid X-Api-Key");
+            problems.write(req, resp, 401, "UNAUTHENTICATED", "Missing or invalid X-Api-Key");
             return;
         }
         String required = requiredScope(req.getMethod(), req.getRequestURI());
         if (required != null && !match.get().scopes().contains(required)) {
-            problems.write(resp, 403, "FORBIDDEN", "Missing scope " + required);
+            problems.write(req, resp, 403, "FORBIDDEN", "Missing scope " + required);
             return;
         }
         req.setAttribute(CLIENT_ATTR, match.get().client());
@@ -64,7 +64,7 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
             return get ? "inventory:read" : null;
         }
         if (path.startsWith("/api/v1/reservations")) {
-            return "POST".equals(method) ? "inventory:reserve" : null;
+            return "POST".equals(method) ? "inventory:reserve" : (get ? "inventory:read" : null);
         }
         if (path.startsWith("/api/v1/replenishment")) {
             return get ? "replenishment:read" : "replenishment:approve";

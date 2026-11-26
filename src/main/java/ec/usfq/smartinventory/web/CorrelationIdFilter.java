@@ -13,14 +13,14 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-/** Asigna requestId (que tambien es el correlationId de los eventos) y lo pone en MDC y en la respuesta. */
+/** Asigna requestId UUID (que tambien es el correlationId de los eventos y de los problemas) y lo pone en MDC y en la respuesta. */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class CorrelationIdFilter extends OncePerRequestFilter {
 
     public static final String HEADER = "X-Request-Id";
     public static final String MDC_KEY = "requestId";
-    private static final Pattern SAFE = Pattern.compile("[A-Za-z0-9._-]{8,64}");   // evita log injection
+    private static final Pattern SAFE = Pattern.compile("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}");   // solo UUID (contrato) y evita log injection
 
     @Override
     protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp, FilterChain chain)

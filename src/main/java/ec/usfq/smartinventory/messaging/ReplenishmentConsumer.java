@@ -3,6 +3,7 @@ package ec.usfq.smartinventory.messaging;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ec.usfq.smartinventory.config.RabbitConfig;
 import ec.usfq.smartinventory.domain.ReplenishmentRule;
+import ec.usfq.smartinventory.application.EventPayloads;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -64,7 +65,8 @@ public class ReplenishmentConsumer {
             int reorderPoint = ((Number) cfg.get(0).get("reorder_point")).intValue();
             int target = ((Number) cfg.get(0).get("target_level")).intValue();
 
-            rule.evaluate(sku, available == null ? 0 : available, reorderPoint, target).ifPresent(s -> {
+            final int avail = available == null ? 0 : available;
+            rule.evaluate(sku, avail, reorderPoint, target).ifPresent(s -> {
                 UUID id = UUID.randomUUID();
                 int inserted = jdbc.update("""
                         insert into replenishment_suggestion (id, sku, supplier, suggested_qty)
@@ -72,8 +74,8 @@ public class ReplenishmentConsumer {
                         on conflict (sku) where status = 'OPEN' do nothing""",
                         id, sku, cfg.get(0).get("supplier"), s.quantity());
                 if (inserted == 1) {
-                    outbox.append(RabbitConfig.SUGGESTION_OPENED, e.correlationId(),
-                            Map.of("suggestionId", id.toString(), "sku", sku, "suggestedQty", s.quantity()));
+                    outbox.append(DomainEvent.RISK_DETECTED, e.correlationId(), EventPayloads.riskDetected(id, sku, avail, reorderPoint,
+                            s.quantity(), (String) cfg.get(0).get("supplier"), clock.instant()));
                     log.info("replenishment suggestion opened for sku {}", sku);
                 }
             });

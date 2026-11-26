@@ -31,7 +31,7 @@ curl -s -H 'X-Api-Key: dev-fulfillment-key' -H 'Idempotency-Key: demo-0001' -H '
 ## Arquitectura (resumen)
 
 `web` (filtros: correlación → autenticación/scope → rate limit; controladores; `problem+json`) → `application` (casos de uso transaccionales) → `domain` (FEFO, reposición: Java puro, sin Spring) · `ratelimit` (token bucket / ventana fija) · `messaging` (Outbox, publicador, consumidores, idempotencia).
-Decisiones en `docs/adr/`. Evento versionado en `docs/events/`. Contrato en `openapi/openapi.yaml`. Runbook en `docs/runbook.md`.
+Decisiones en `docs/adr/`. Contratos (HTTP y eventos) en `contracts/` (ver la seccion *Contratos*). Runbook en `docs/runbook.md`.
 
 ## Patrones y SOLID (dónde está cada uno)
 
@@ -49,7 +49,7 @@ Se omitió *Repository* como capa separada a propósito: con SQL explícito y 4 
 | Parte | Estado |
 |---|---|
 | Dominio (FEFO, reposición) y rate limiters: 15 pruebas | **Ejecutadas y aprobadas** (compiladas con `javac`, sin Maven) |
-| `openapi.yaml`, JSON Schema del evento | **Validados sintácticamente** y sus `$ref` resuelven (PyYAML); `OpenApiContractTest` no se ejecutó |
+| `contracts/openapi.yaml`, `contracts/asyncapi.yaml`, JSON Schemas | Validados con redocly, asyncapi, ajv y las pruebas de contrato (`mvn verify`); ver *Contratos* |
 | Capa Spring (filtros, servicios, outbox, consumidores), `ReservationFlowIT`, `OpenApiContractTest`, Dockerfile, compose, workflow | **Escritos pero NO compilados ni ejecutados**: el entorno de generación no alcanzaba Maven Central ni tenía broker/BD. Correr `mvn verify` primero y corregir lo que aparezca |
 
 ## DAST autenticado
@@ -60,3 +60,42 @@ El baseline de ZAP apunta a `/v3/api-docs` (público). Para escanear endpoints p
 - Autenticación por API key con scopes: suficiente para el laboratorio; producción usaría OIDC/JWT.
 - `outbox` y `idempotency_key` crecen: falta job de purga.
 - Datos semilla con fechas de nov-2026.
+
+## Contratos
+
+El contrato va **primero** y se valida automaticamente en cada PR (`.github/workflows/contracts.yml`).
+
+```
+contracts/
+  openapi.yaml                       API HTTP v1 (OpenAPI 3.0.3): operaciones, scopes, schemas, ejemplos, errores problem+json
+  asyncapi.yaml                      Eventos (AsyncAPI 3.0): exchange, routing keys, colas, bindings, ack/retry/DLQ
+  schemas/
+    stock-reserved.v1.schema.json              inventory.stock-reserved.v1 (sobre + payload, JSON Schema 2020-12)
+    replenishment-risk-detected.v1.schema.json replenishment.risk-detected.v1
+  examples/                          ejemplos validos (+ invalid/ : deben ser rechazados por el schema)
+  COMPATIBILITY.md                   reglas de versionado, migracion y reporte de compatibilidad generado
+redocly.yaml                         reglas de lint de OpenAPI
+scripts/validate-contracts.sh        lint/validacion local (redocly, asyncapi, ajv)
+scripts/compat-report.sh             compatibilidad vs rama base (oasdiff + scripts/schema-compat.mjs)
+```
+
+> La guia del deber nombra el primer schema `reservation-created.v1.schema.json`; aqui se llama `stock-reserved.v1.schema.json`
+> por coherencia con el evento (`inventory.stock-reserved`) y su routing key. `info.version` (1.0.0) versiona el *documento*;
+> la version de la API es `/api/v1` y la del evento `.v1` + `schemaVersion` semver (ver `contracts/COMPATIBILITY.md`).
+
+**Validar en local** (requiere Node 20+, Docker para oasdiff y Docker/Maven para las pruebas Java):
+
+```bash
+bash scripts/validate-contracts.sh            # redocly lint + asyncapi validate + ajv (schemas y ejemplos validos/invalidos)
+mvn test -Dtest='OpenApiContractTest,HttpContractTest,EventContractTest,AsyncApiConsistencyTest'   # contrato HTTP y de eventos
+mvn verify                                    # todo, incluidas las pruebas de integracion (Testcontainers)
+bash scripts/compat-report.sh main            # cambios incompatibles respecto a main (exit 1 si los hay); --update-doc actualiza COMPATIBILITY.md
+```
+
+**Migracion de routing keys.** Los eventos ahora se publican como `inventory.stock-reserved.v1` y `replenishment.risk-detected.v1`.
+Mientras `smartinventory.events.legacy-routing-keys.enabled=true` (variable `LEGACY_ROUTING_KEYS_ENABLED`, por defecto `true`)
+tambien se publican con las claves anteriores y sobre anterior, y las colas siguen enlazadas a ambas. Plan de retiro en `contracts/COMPATIBILITY.md`.
+
+Cambios de comportamiento introducidos por el contrato: los errores `problem+json` llevan `instance` y `correlationId` (antes
+`requestId`); `X-Request-Id` solo se acepta si es UUID; `POST /reservations` devuelve `Location` y existe
+`GET /api/v1/reservations/{id}`; los filtros invalidos de `GET /replenishment/suggestions` responden 422.

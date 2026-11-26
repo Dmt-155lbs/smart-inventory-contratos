@@ -1,0 +1,18 @@
+{
+  "eventId": "5e1a9c73-4b28-4d6f-a0c9-7f2d8b3e1a64",
+  "eventType": "replenishment.risk-detected",
+  "schemaVersion": "1.0.0",
+  "occurredAt": "2026-11-20T14:03:12.100Z",
+  "correlationId": "7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11",
+  "producer": "replenishment-service",
+  "unexpectedEnvelopeField": true,
+  "payload": {
+    "suggestionId": "no-es-uuid",
+    "sku": "SKU-1001",
+    "availableQty": -5,
+    "reorderPoint": 60,
+    "supplier": "PROV-ANDINA",
+    "riskLevel": "SEVERE",
+    "detectedAt": "2026-11-20T14:03:12.100Z"
+  }
+}

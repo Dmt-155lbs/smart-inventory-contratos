@@ -9,6 +9,7 @@ import ec.usfq.smartinventory.application.ReservationService;
 import ec.usfq.smartinventory.domain.InsufficientStockException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,7 +47,7 @@ class ReservationFlowIT {
     @Autowired JdbcTemplate jdbc;
 
     private static ReservationService.Command cmd(String sku, String key, int qty) {
-        return new ReservationService.Command("test-client", key, sku, "BOD-T", qty, "PEDIDO-1", "req-" + key);
+        return new ReservationService.Command("test-client", key, sku, "BOD-T", qty, "PEDIDO-1", UUID.randomUUID().toString());
     }
 
     private void seed(String sku, int physical) {
@@ -64,7 +65,7 @@ class ReservationFlowIT {
         var result = service.reserve(cmd("IT-OUTBOX", "key-outbox-1", 4));
         assertEquals(4, reserved("IT-OUTBOX"));
         int events = jdbc.queryForObject(
-                "select count(*) from outbox where routing_key = 'inventory.stock-reserved' and payload->'payload'->>'reservationId' = ?",
+                "select count(*) from outbox where routing_key = 'inventory.stock-reserved.v1' and payload->'payload'->>'reservationId' = ?",  // gitleaks:allow (routing key, no es un secreto)
                 Integer.class, result.reservationId().toString());
         assertEquals(1, events);
     }
