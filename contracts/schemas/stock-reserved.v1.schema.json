@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartinventory.usfq.edu.ec/schemas/inventory.stock-reserved/1.0.0",
+  "title": "inventory.stock-reserved v1",
+  "description": "Evento de negocio: se confirmo una reserva de stock (FEFO). Emisor: inventory-service (via Outbox). Exchange smartinventory.events, routing key inventory.stock-reserved.v1. Entrega al-menos-una-vez: los consumidores deben deduplicar por eventId. Politica: el sobre (envelope) es estricto (additionalProperties=false: cambiarlo es un cambio mayor de plataforma); el payload tolera campos desconocidos para que v1.1.0 pueda agregar campos opcionales sin romper consumidores.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "correlationId", "producer", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid", "description": "Identificador unico del evento; clave de deduplicacion." },
+    "eventType": { "const": "inventory.stock-reserved" },
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "description": "Semver del esquema del evento. Todo 1.x.y es compatible con v1; un cambio incompatible usa eventType/routing key v2."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "description": "Instante del hecho de negocio, ISO-8601 en UTC (sufijo Z)."
+    },
+    "correlationId": { "type": "string", "format": "uuid", "description": "Igual al X-Request-Id de la peticion HTTP que origino el evento." },
+    "producer": { "const": "inventory-service" },
+    "payload": { "$ref": "#/$defs/payload" }
+  },
+  "$defs": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["reservationId", "sku", "qty", "lots"],
+      "properties": {
+        "reservationId": { "type": "string", "format": "uuid" },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "qty": { "type": "integer", "minimum": 1, "description": "Unidades reservadas en total." },
+        "lots": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Lotes asignados, en orden FEFO.",
+          "items": { "$ref": "#/$defs/lot" }
+        },
+        "location": { "type": "string", "description": "Opcional: ubicacion/bodega de la reserva." },
+        "destination": { "type": "string", "description": "Opcional: pedido o destino de la reserva." }
+      }
+    },
+    "lot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["lotId", "qty", "expiresAt"],
+      "properties": {
+        "lotId": { "type": "string", "minLength": 1, "description": "Codigo del lote (lot_code)." },
+        "qty": { "type": "integer", "minimum": 1 },
+        "expiresAt": { "type": "string", "format": "date", "description": "Fecha de vencimiento del lote (YYYY-MM-DD)." }
+      }
+    }
+  },
+  "x-compatibility": "Agregar campos opcionales => 1.1.0 (sigue siendo v1). Quitar/renombrar campos o cambiar su significado => eventType/routing key v2 con doble publicacion durante la migracion."
+}

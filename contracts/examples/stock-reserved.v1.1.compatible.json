@@ -1,0 +1,17 @@
+{
+  "eventId": "1c8e5d02-7a39-4b6f-9e21-8f3a6b0d4c55",
+  "eventType": "inventory.stock-reserved",
+  "schemaVersion": "1.1.0",
+  "occurredAt": "2026-12-02T08:00:00Z",
+  "correlationId": "0e6f2b9a-1d44-4c0e-8a73-5b9d2c1f6e88",
+  "producer": "inventory-service",
+  "payload": {
+    "reservationId": "a7c3d9e1-52b6-4f08-8d14-3e6b9a2c7f01",
+    "sku": "SKU-2002",
+    "qty": 10,
+    "lots": [
+      { "lotId": "M-1", "qty": 10, "expiresAt": "2027-01-10", "warehouseZone": "A3" }
+    ],
+    "priority": "HIGH"
+  }
+}

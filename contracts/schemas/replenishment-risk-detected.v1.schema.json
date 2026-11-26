@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartinventory.usfq.edu.ec/schemas/replenishment.risk-detected/1.0.0",
+  "title": "replenishment.risk-detected v1",
+  "description": "Evento de negocio: el stock disponible de un SKU cayo bajo su punto de reorden y se abrio una sugerencia de reposicion. Emisor: replenishment-service (via Outbox). Exchange smartinventory.events, routing key replenishment.risk-detected.v1. Entrega al-menos-una-vez: deduplicar por eventId. Politica: sobre estricto (additionalProperties=false); payload abierto para permitir campos opcionales en 1.x.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "correlationId", "producer", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "const": "replenishment.risk-detected" },
+    "schemaVersion": { "type": "string", "pattern": "^1\\.\\d+\\.\\d+$" },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "correlationId": { "type": "string", "format": "uuid" },
+    "producer": { "const": "replenishment-service" },
+    "payload": { "$ref": "#/$defs/payload" }
+  },
+  "$defs": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["suggestionId", "sku", "availableQty", "reorderPoint", "suggestedQty", "supplier", "riskLevel", "detectedAt"],
+      "properties": {
+        "suggestionId": { "type": "string", "format": "uuid", "description": "Id de la sugerencia abierta (GET /api/v1/replenishment/suggestions)." },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "availableQty": { "type": "integer", "minimum": 0, "description": "Disponible (fisico - reservado, sin lotes vencidos) al evaluar la regla." },
+        "reorderPoint": { "type": "integer", "minimum": 0 },
+        "suggestedQty": { "type": "integer", "minimum": 1, "description": "Cantidad sugerida para llegar al nivel objetivo." },
+        "supplier": { "type": "string", "minLength": 1 },
+        "riskLevel": {
+          "type": "string",
+          "enum": ["MEDIUM", "HIGH", "CRITICAL"],
+          "description": "CRITICAL: disponible = 0; HIGH: disponible <= reorderPoint/2; MEDIUM: resto bajo el punto de reorden."
+        },
+        "detectedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+        "location": { "type": "string", "description": "Opcional: reservado para evaluaciones por ubicacion; hoy la regla agrega todas las ubicaciones y no se emite." }
+      }
+    }
+  },
+  "x-compatibility": "Agregar campos opcionales => 1.1.0 (sigue siendo v1). Quitar/renombrar campos o cambiar su significado => replenishment.risk-detected.v2."
+}

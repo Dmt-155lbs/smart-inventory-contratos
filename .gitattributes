@@ -1,0 +1,8 @@
+# Normaliza finales de linea: LF en el repo y en el checkout (evita que CRLF de Windows rompa scripts y diffs)
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+# Binarios
+*.png binary
+*.jpg binary
+*.jar binary

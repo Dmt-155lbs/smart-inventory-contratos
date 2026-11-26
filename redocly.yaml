@@ -1,0 +1,17 @@
+# Configuracion de Redocly CLI para contracts/openapi.yaml
+extends:
+  - recommended
+
+rules:
+  info-license: off          # trabajo academico sin licencia publica
+  info-license-strict: off
+  # Los servidores del contrato apuntan a desarrollo local; es intencional.
+  no-server-example.com: off
+  # Endurecimientos (la CI bloquea el PR si se incumplen)
+  operation-operationId: error
+  operation-summary: error
+  operation-4xx-response: error
+  operation-2xx-response: error
+  no-unused-components: error
+  no-invalid-media-type-examples: error
+  security-defined: error

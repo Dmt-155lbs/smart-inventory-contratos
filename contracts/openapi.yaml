@@ -1,0 +1,715 @@
+openapi: 3.0.3
+info:
+  title: Smart Inventory API
+  version: 1.0.0
+  description: |
+    Fuente unica de verdad del contrato HTTP. El codigo debe honrarlo y la CI lo verifica
+    (`OpenApiContractTest`, `HttpContractTest`, redocly lint, oasdiff).
+
+    ## Version del documento vs version de la API
+    `info.version` (**1.0.0**) es la version de **este documento** (semver: se incrementa al corregir
+    descripciones, agregar ejemplos o campos opcionales). La version de la **API** es la del prefijo de la URL
+    (**/api/v1**). Son cosas distintas: puede haber documento 1.4.0 de la API v1, y un cambio incompatible exige
+    **/api/v2** (con convivencia y migracion), nunca modificar v1 en silencio. Ver `contracts/COMPATIBILITY.md`.
+
+    ## Autenticacion y autorizacion
+    API key en la cabecera `X-Api-Key`. Cada clave pertenece a un cliente con **scopes**; cada operacion declara
+    el scope requerido en `x-required-scope`:
+
+    | Scope | Permite | Clientes de desarrollo |
+    |---|---|---|
+    | `inventory:read` | `GET /inventory`, `GET /reservations/{id}`, `GET /dashboard/inventory` | ops-console, fulfillment |
+    | `inventory:reserve` | `POST /reservations` | fulfillment |
+    | `replenishment:read` | `GET /replenishment/suggestions` | ops-console, purchasing |
+    | `replenishment:approve` | `POST /replenishment/suggestions/{id}/approve` | ops-console, purchasing |
+
+    **401** = clave ausente o invalida (cliente no identificado). **403** = cliente identificado sin el scope requerido.
+
+    ## Errores
+    Todos los errores usan `application/problem+json` (RFC 9457) con las extensiones `code` (codigo de negocio estable),
+    `correlationId` (igual a la cabecera `X-Request-Id` y al `correlationId` de los eventos) y `errors[]` (detalle por campo).
+
+    ## Rate limit
+    Por cliente autenticado. Todas las respuestas llevan `X-RateLimit-Limit` y `X-RateLimit-Remaining`;
+    el 429 incluye `Retry-After` (segundos).
+  contact:
+    name: Equipo Smart Inventory (USFQ)
+servers:
+  - url: http://localhost:8080
+    description: Desarrollo local (docker compose)
+security:
+  - ApiKey: []
+tags:
+  - name: Inventory
+    description: Consulta de stock fisico, reservado y disponible.
+  - name: Reservations
+    description: Reservas FEFO idempotentes.
+  - name: Replenishment
+    description: Sugerencias de reposicion.
+  - name: Dashboard
+    description: Vista materializada para el tablero.
+paths:
+  /api/v1/inventory:
+    get:
+      tags: [Inventory]
+      operationId: listInventory
+      summary: Stock por SKU, ubicacion y lote
+      description: |
+        Distingue stock fisico, reservado y disponible (`available = physical - reserved`).
+        Sin resultados responde **200** con `items` vacio.
+        Parametros fuera de rango o con formato invalido => **400** (`INVALID_PARAMETER` / `MALFORMED_REQUEST`).
+      x-required-scope: inventory:read
+      security:
+        - ApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/Sku'
+        - $ref: '#/components/parameters/Location'
+        - $ref: '#/components/parameters/Lot'
+        - name: page
+          in: query
+          description: Pagina, base 0.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          description: Tamano de pagina.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: sort
+          in: query
+          description: Campo de ordenamiento (lista blanca).
+          schema: { type: string, enum: [sku, location, lotCode, expiresOn, available], default: expiresOn }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: asc }
+      responses:
+        '200':
+          description: Pagina de stock (puede estar vacia).
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockPage' }
+              examples:
+                conResultados:
+                  summary: Un lote disponible
+                  value:
+                    items:
+                      - { sku: SKU-1001, location: BOD-UIO, lotCode: L-B, expiresOn: '2026-12-01', physical: 30, reserved: 0, available: 30 }
+                    page: 0
+                    size: 20
+                    totalItems: 1
+                sinResultados:
+                  summary: Filtro sin coincidencias
+                  value: { items: [], page: 0, size: 20, totalItems: 0 }
+        '400':
+          description: Parametro con formato o rango invalido.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                sizeFueraDeRango:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/invalid-parameter
+                    title: Bad Request
+                    status: 400
+                    code: INVALID_PARAMETER
+                    detail: Invalid request parameter
+                    instance: /api/v1/inventory
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+                    errors:
+                      - { field: list.size, message: debe ser menor que o igual a 100 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /api/v1/reservations:
+    post:
+      tags: [Reservations]
+      operationId: createReservation
+      summary: Reserva FEFO atomica e idempotente
+      description: |
+        Asigna lotes por orden de vencimiento (FEFO, nunca vencidos) sin sobreasignar; el resultado lista los lotes
+        usados en `lines`. Publica el evento `inventory.stock-reserved.v1` (ver `contracts/asyncapi.yaml`).
+
+        **Idempotencia:** `Idempotency-Key` es obligatoria. Repetir la misma clave con el mismo cuerpo devuelve la
+        reserva original (**200** + `Idempotent-Replay: true`). La misma clave con otro cuerpo => **422**
+        (`IDEMPOTENCY_KEY_REUSED`).
+
+        **Nota sobre nombres:** el cuerpo usa `location` y `quantity` (el stock se reserva por SKU y ubicacion);
+        el evento emitido usa `qty` (ver AsyncAPI).
+      x-required-scope: inventory:reserve
+      security:
+        - ApiKey: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Clave unica por intento logico de reserva (8-100 caracteres). Reutilizable solo con el mismo cuerpo.
+          schema: { type: string, minLength: 8, maxLength: 100 }
+          example: reserva-pedido-7788-v1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReservationRequest' }
+            examples:
+              reservaFefo:
+                summary: Reserva que consume dos lotes
+                value: { sku: SKU-1001, location: BOD-UIO, quantity: 35, destination: PEDIDO-7788 }
+      responses:
+        '201':
+          description: Reserva creada.
+          headers:
+            Location:
+              description: URL de la reserva creada (`GET /api/v1/reservations/{id}`).
+              required: true
+              schema: { type: string }
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+              examples:
+                dosLotes:
+                  value:
+                    reservationId: 3f2a7c1e-8b44-4d1a-9a6e-52d1c0b7e9aa
+                    sku: SKU-1001
+                    location: BOD-UIO
+                    quantity: 35
+                    destination: PEDIDO-7788
+                    status: CONFIRMED
+                    replay: false
+                    lines:
+                      - { lotCode: L-B, expiresOn: '2026-12-01', quantity: 30 }
+                      - { lotCode: L-A, expiresOn: '2026-12-15', quantity: 5 }
+        '200':
+          description: Reintento idempotente; devuelve la reserva original.
+          headers:
+            Idempotent-Replay:
+              description: Siempre `true` en un reintento idempotente.
+              required: true
+              schema: { type: string, enum: ['true'] }
+            Location:
+              description: URL de la reserva original.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+              examples:
+                reintento:
+                  value:
+                    reservationId: 3f2a7c1e-8b44-4d1a-9a6e-52d1c0b7e9aa
+                    sku: SKU-1001
+                    location: BOD-UIO
+                    quantity: 35
+                    destination: PEDIDO-7788
+                    status: CONFIRMED
+                    replay: true
+                    lines:
+                      - { lotCode: L-B, expiresOn: '2026-12-01', quantity: 30 }
+                      - { lotCode: L-A, expiresOn: '2026-12-15', quantity: 5 }
+        '400':
+          description: Cabecera `Idempotency-Key` ausente o fuera de rango, o cuerpo ilegible (JSON malformado, tipos erroneos).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                sinIdempotencyKey:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/malformed-request
+                    title: Bad Request
+                    status: 400
+                    code: MALFORMED_REQUEST
+                    detail: Malformed request (body, header or parameter type)
+                    instance: /api/v1/reservations
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Stock insuficiente (`INSUFFICIENT_STOCK`). Reintentar igual no ayuda; reducir la cantidad o esperar reposicion.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                stockInsuficiente:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/insufficient-stock
+                    title: Conflict
+                    status: 409
+                    code: INSUFFICIENT_STOCK
+                    detail: Requested 99999, assignable 175
+                    instance: /api/v1/reservations
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+        '422':
+          description: Validacion del cuerpo (`VALIDATION_FAILED`) o clave de idempotencia reutilizada con otro cuerpo (`IDEMPOTENCY_KEY_REUSED`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                validacion:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/validation-failed
+                    title: Unprocessable Entity
+                    status: 422
+                    code: VALIDATION_FAILED
+                    detail: Request body failed validation
+                    instance: /api/v1/reservations
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+                    errors:
+                      - { field: quantity, message: debe ser mayor que o igual a 1 }
+                claveReutilizada:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/idempotency-key-reused
+                    title: Unprocessable Entity
+                    status: 422
+                    code: IDEMPOTENCY_KEY_REUSED
+                    detail: Idempotency-Key was already used with a different request
+                    instance: /api/v1/reservations
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /api/v1/reservations/{id}:
+    get:
+      tags: [Reservations]
+      operationId: getReservation
+      summary: Consulta una reserva por id
+      description: Recurso apuntado por la cabecera `Location` de `POST /reservations`.
+      x-required-scope: inventory:read
+      security:
+        - ApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: La reserva.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/replenishment/suggestions:
+    get:
+      tags: [Replenishment]
+      operationId: listSuggestions
+      summary: Sugerencias de reposicion
+      description: |
+        Consulta de solo lectura: **no modifica stock ni el estado de las sugerencias** (GET seguro).
+        Filtros invalidos (estado desconocido, `limit` fuera de rango, SKU con formato invalido) => **422**
+        (`VALIDATION_FAILED`). Un `limit` que no es numerico => 400.
+      x-required-scope: replenishment:read
+      security:
+        - ApiKey: []
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/SuggestionStatus' }
+        - $ref: '#/components/parameters/Sku'
+        - name: supplier
+          in: query
+          description: Codigo de proveedor.
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+          example: PROV-ANDINA
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Lista de sugerencias (mas recientes primero).
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Suggestion' } }
+              examples:
+                abiertas:
+                  value:
+                    - id: 0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10
+                      sku: SKU-1001
+                      supplier: PROV-ANDINA
+                      suggestedQty: 220
+                      status: OPEN
+                      createdAt: '2026-11-20T14:03:11.250Z'
+                      approvedBy: null
+                      approvedAt: null
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: Filtro invalido (`VALIDATION_FAILED`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                estadoDesconocido:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/validation-failed
+                    title: Unprocessable Entity
+                    status: 422
+                    code: VALIDATION_FAILED
+                    detail: Invalid filter value
+                    instance: /api/v1/replenishment/suggestions
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+                    errors:
+                      - { field: list.status, message: debe ajustarse a "OPEN|APPROVED" }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/replenishment/suggestions/{id}/approve:
+    post:
+      tags: [Replenishment]
+      operationId: approveSuggestion
+      summary: Aprobar una sugerencia de reposicion (OPEN a APPROVED)
+      description: |
+        Transicion unica y atomica **OPEN -> APPROVED**; registra quien aprueba (cliente de la API key) y cuando.
+        Aprobar una sugerencia que ya no esta OPEN => **409** (`INVALID_TRANSITION`). Id inexistente => **404**.
+        Sin cuerpo.
+      x-required-scope: replenishment:approve
+      security:
+        - ApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Sugerencia aprobada.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Suggestion' }
+              examples:
+                aprobada:
+                  value:
+                    id: 0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10
+                    sku: SKU-1001
+                    supplier: PROV-ANDINA
+                    suggestedQty: 220
+                    status: APPROVED
+                    createdAt: '2026-11-20T14:03:11.250Z'
+                    approvedBy: purchasing
+                    approvedAt: '2026-11-21T09:15:00.100Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Transicion invalida (`INVALID_TRANSITION`) - la sugerencia ya no esta OPEN.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                yaAprobada:
+                  value:
+                    type: https://smartinventory.usfq.edu.ec/problems/invalid-transition
+                    title: Conflict
+                    status: 409
+                    code: INVALID_TRANSITION
+                    detail: Suggestion is APPROVED; only OPEN can be approved
+                    instance: /api/v1/replenishment/suggestions/0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10/approve
+                    correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /api/v1/dashboard/inventory:
+    get:
+      tags: [Dashboard]
+      operationId: dashboardInventory
+      summary: Vista del dashboard con antiguedad del dato
+      description: Vista materializada por el consumidor del dashboard (consistencia eventual); expone `processingDelayMs` y `stale`.
+      x-required-scope: inventory:read
+      security:
+        - ApiKey: []
+      responses:
+        '200':
+          description: Filas con `lastUpdatedAt`, `processingDelayMs` y `stale`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Clave de API del cliente. La autorizacion es por **scope** (ver `x-scopes` y `x-required-scope` de cada operacion).
+        401 si falta o es invalida; 403 si el cliente no tiene el scope.
+      x-scopes:
+        inventory:read: Consultar stock, reservas y dashboard
+        inventory:reserve: Crear reservas
+        replenishment:read: Consultar sugerencias de reposicion
+        replenishment:approve: Aprobar sugerencias de reposicion
+  headers:
+    XRequestId:
+      description: Identificador de correlacion (UUID) de la peticion; tambien es el `correlationId` de los eventos y de los problemas.
+      schema: { type: string, format: uuid }
+    XRateLimitLimit:
+      description: Capacidad del limitador para el cliente.
+      schema: { type: integer }
+    XRateLimitRemaining:
+      description: Peticiones restantes.
+      schema: { type: integer }
+  parameters:
+    Sku:
+      name: sku
+      in: query
+      description: Codigo de SKU.
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+      example: SKU-1001
+    Location:
+      name: location
+      in: query
+      description: Ubicacion/bodega.
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+      example: BOD-UIO
+    Lot:
+      name: lot
+      in: query
+      description: Codigo de lote.
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+      example: L-B
+  responses:
+    BadRequest:
+      description: Parametro, cabecera o cuerpo invalidos (`INVALID_PARAMETER`, `MALFORMED_REQUEST`). Corregir y reenviar.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            malformada:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/malformed-request
+                title: Bad Request
+                status: 400
+                code: MALFORMED_REQUEST
+                detail: Malformed request (body, header or parameter type)
+                instance: /api/v1/replenishment/suggestions/no-es-uuid/approve
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+    Unauthorized:
+      description: Falta `X-Api-Key` o es invalida (`UNAUTHENTICATED`). Incluye `WWW-Authenticate`.
+      headers:
+        WWW-Authenticate:
+          description: Esquema de autenticacion esperado.
+          schema: { type: string }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            sinClave:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/unauthenticated
+                title: Unauthorized
+                status: 401
+                code: UNAUTHENTICATED
+                detail: Missing or invalid X-Api-Key
+                instance: /api/v1/inventory
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+    Forbidden:
+      description: Cliente autenticado sin el scope requerido (`FORBIDDEN`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            sinScope:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/forbidden
+                title: Forbidden
+                status: 403
+                code: FORBIDDEN
+                detail: Missing scope replenishment:approve
+                instance: /api/v1/replenishment/suggestions/0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10/approve
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+    NotFound:
+      description: Recurso inexistente (`NOT_FOUND`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            noExiste:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/not-found
+                title: Not Found
+                status: 404
+                code: NOT_FOUND
+                detail: Suggestion 0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10 not found
+                instance: /api/v1/replenishment/suggestions/0b4f1c52-6a0e-4a3b-8f6d-2f6c9d1a7e10/approve
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+    TooManyRequests:
+      description: Limite de tasa excedido (`RATE_LIMITED`). Esperar `Retry-After` segundos.
+      headers:
+        Retry-After:
+          description: Segundos hasta poder reintentar.
+          required: true
+          schema: { type: integer, minimum: 0 }
+        X-RateLimit-Limit: { $ref: '#/components/headers/XRateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/XRateLimitRemaining' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            limitado:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/rate-limited
+                title: Too Many Requests
+                status: 429
+                code: RATE_LIMITED
+                detail: Too many requests; retry after 1s
+                instance: /api/v1/reservations
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+    Unavailable:
+      description: Dependencia caida (`DEPENDENCY_UNAVAILABLE`). Reintentar con backoff exponencial y jitter.
+      headers:
+        Retry-After:
+          description: Segundos sugeridos antes de reintentar.
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            dependenciaCaida:
+              value:
+                type: https://smartinventory.usfq.edu.ec/problems/dependency-unavailable
+                title: Service Unavailable
+                status: 503
+                code: DEPENDENCY_UNAVAILABLE
+                detail: Temporary failure; retry later
+                instance: /api/v1/inventory
+                correlationId: 7d0b7f1e-6d5c-4f43-a1d2-0a3f9d6b2c11
+  schemas:
+    Problem:
+      type: object
+      description: Detalle de error segun RFC 9457 (`application/problem+json`) con extensiones propias.
+      required: [type, title, status, detail, instance, code, correlationId]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI que identifica el tipo de problema (`https://smartinventory.usfq.edu.ec/problems/<code-en-kebab>`).
+        title: { type: string, description: Frase HTTP estandar del estado. }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string, description: Explicacion legible de esta ocurrencia; sin trazas ni SQL. }
+        instance: { type: string, description: Ruta de la peticion que produjo el error. }
+        code:
+          type: string
+          description: Codigo de negocio estable (extension).
+          enum:
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - INVALID_PARAMETER
+            - MALFORMED_REQUEST
+            - VALIDATION_FAILED
+            - INSUFFICIENT_STOCK
+            - IDEMPOTENCY_KEY_REUSED
+            - INVALID_TRANSITION
+            - RATE_LIMITED
+            - DEPENDENCY_UNAVAILABLE
+            - INTERNAL_ERROR
+        correlationId:
+          type: string
+          format: uuid
+          description: Igual a la cabecera `X-Request-Id`; sirve para rastrear la peticion en logs y eventos.
+        errors:
+          type: array
+          description: Detalle por campo (solo en errores de validacion).
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+    SuggestionStatus:
+      type: string
+      enum: [OPEN, APPROVED]
+    StockItem:
+      type: object
+      required: [sku, location, lotCode, expiresOn, physical, reserved, available]
+      properties:
+        sku: { type: string }
+        location: { type: string }
+        lotCode: { type: string }
+        expiresOn: { type: string, format: date }
+        physical: { type: integer, minimum: 0, description: Unidades fisicas en el lote. }
+        reserved: { type: integer, minimum: 0, description: Unidades comprometidas por reservas. }
+        available: { type: integer, minimum: 0, description: physical - reserved }
+    StockPage:
+      type: object
+      required: [items, page, size, totalItems]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/StockItem' } }
+        page: { type: integer, minimum: 0 }
+        size: { type: integer, minimum: 1 }
+        totalItems: { type: integer, format: int64, minimum: 0 }
+    ReservationRequest:
+      type: object
+      required: [sku, location, quantity, destination]
+      properties:
+        sku: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+        location: { type: string, pattern: '^[A-Za-z0-9_-]{1,32}$' }
+        quantity: { type: integer, minimum: 1, maximum: 100000 }
+        destination: { type: string, minLength: 1, maxLength: 64, description: Pedido o destino de la reserva. }
+    ReservationLine:
+      type: object
+      required: [lotCode, expiresOn, quantity]
+      properties:
+        lotCode: { type: string }
+        expiresOn: { type: string, format: date }
+        quantity: { type: integer, minimum: 1 }
+    Reservation:
+      type: object
+      required: [reservationId, sku, location, quantity, destination, status, lines, replay]
+      properties:
+        reservationId: { type: string, format: uuid }
+        sku: { type: string }
+        location: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        destination: { type: string }
+        status: { type: string, enum: [CONFIRMED] }
+        replay: { type: boolean, description: true si es un reintento idempotente. }
+        lines:
+          type: array
+          description: Resultado FEFO, en orden de consumo.
+          items: { $ref: '#/components/schemas/ReservationLine' }
+    Suggestion:
+      type: object
+      required: [id, sku, supplier, suggestedQty, status, createdAt, approvedBy, approvedAt]
+      properties:
+        id: { type: string, format: uuid }
+        sku: { type: string }
+        supplier: { type: string }
+        suggestedQty: { type: integer, minimum: 1 }
+        status: { $ref: '#/components/schemas/SuggestionStatus' }
+        createdAt: { type: string, format: date-time }
+        approvedBy: { type: string, nullable: true }
+        approvedAt: { type: string, format: date-time, nullable: true }
+    DashboardRow:
+      type: object
+      properties:
+        sku: { type: string }
+        availableNow: { type: integer }
+        reservationsCount: { type: integer }
+        lastReservationId: { type: string, format: uuid }
+        lastStatus: { type: string }
+        lastEventAt: { type: string, format: date-time }
+        lastUpdatedAt: { type: string, format: date-time }
+        processingDelayMs: { type: integer, format: int64 }
+        stale: { type: boolean }
+    DashboardView:
+      type: object
+      required: [generatedAt, items]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        items: { type: array, items: { $ref: '#/components/schemas/DashboardRow' } }
