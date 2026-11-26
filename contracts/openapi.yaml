@@ -670,7 +670,7 @@ components:
         quantity: { type: integer, minimum: 1 }
     Reservation:
       type: object
-      required: [reservationId, sku, location, quantity, destination, status, lines, replay]
+      required: [reservationId, sku, location, quantity, destination, status, allocations, replay]
       properties:
         reservationId: { type: string, format: uuid }
         sku: { type: string }
@@ -679,7 +679,7 @@ components:
         destination: { type: string }
         status: { type: string, enum: [CONFIRMED] }
         replay: { type: boolean, description: true si es un reintento idempotente. }
-        lines:
+        allocations:
           type: array
           description: Resultado FEFO, en orden de consumo.
           items: { $ref: '#/components/schemas/ReservationLine' }
