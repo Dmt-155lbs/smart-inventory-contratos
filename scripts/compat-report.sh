@@ -80,8 +80,11 @@ else
     {
       echo; echo "**Informativo (no bloquea)** - diferencias respecto al \`openapi/openapi.yaml\` original del curso:"; echo; echo '```'
     } >> "$REPORT"
-    oasdiff breaking "$WORK/base/legacy-openapi.yaml" contracts/openapi.yaml > "$WORK/legacy.txt" 2>&1
-    [ -s "$WORK/legacy.txt" ] && cat "$WORK/legacy.txt" >> "$REPORT" || echo "(ninguno)" >> "$REPORT"
+    oasdiff breaking "$WORK/base/legacy-openapi.yaml" contracts/openapi.yaml --format singleline > "$WORK/legacy.txt" 2>&1
+    if [ -s "$WORK/legacy.txt" ]; then
+      echo "($(grep -c . "$WORK/legacy.txt") hallazgos; se muestran los primeros 12 - son esperados: el contrato original no estaba publicado)" >> "$REPORT"
+      grep . "$WORK/legacy.txt" | head -n 12 >> "$REPORT"
+    else echo "(ninguno)" >> "$REPORT"; fi
     echo '```' >> "$REPORT"
   fi
 fi

@@ -92,5 +92,43 @@ Local: `bash scripts/compat-report.sh main` (ver README, seccion Contratos).
 ## 6. Reporte generado
 
 <!-- compat-report:start -->
-_Aun no generado. Ejecutar `bash scripts/compat-report.sh main --update-doc`._
+## Reporte de compatibilidad de contratos
+
+- Base: `main` (16b8c28)  -  Cambio propuesto: `3b99cd3` + arbol de trabajo
+- Generado: 2026-11-26T00:33:31Z por `scripts/compat-report.sh`
+
+### OpenAPI (oasdiff) - contracts/openapi.yaml
+
+La base `main` no contiene `contracts/openapi.yaml`: es la **primera publicacion** del contrato, no hay linea base
+contra la cual comparar (resultado: sin cambios incompatibles).
+
+**Informativo (no bloquea)** - diferencias respecto al `openapi/openapi.yaml` original del curso:
+
+```
+(30 hallazgos; se muestran los primeros 12 - son esperados: el contrato original no estaba publicado)
+29 changes: 29 error, 0 warning, 0 info
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/dashboard/inventory removed the required property `requestId` from the response with the `401` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/dashboard/inventory removed the required property `requestId` from the response with the `403` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/dashboard/inventory removed the required property `requestId` from the response with the `429` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/inventory removed the required property `requestId` from the response with the `400` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/inventory removed the required property `requestId` from the response with the `401` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/inventory removed the required property `requestId` from the response with the `403` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/inventory removed the required property `requestId` from the response with the `429` status [response-required-property-removed]. 
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/inventory removed the required property `requestId` from the response with the `503` status [response-required-property-removed]. 
+error at contracts/openapi.yaml, in API GET /api/v1/replenishment/suggestions added the pattern `^[A-Za-z0-9_-]{1,64}$` to the `query` request parameter `sku` [request-parameter-pattern-added]. This is a breaking change because adding a pattern restriction to a previously unrestricted parameter will reject values that were previously accepted, breaking existing clients
+error at contracts/openapi.yaml, in API GET /api/v1/replenishment/suggestions added the pattern `^[A-Za-z0-9_-]{1,64}$` to the `query` request parameter `supplier` [request-parameter-pattern-added]. This is a breaking change because adding a pattern restriction to a previously unrestricted parameter will reject values that were previously accepted, breaking existing clients
+error at .compat-tmp/base/legacy-openapi.yaml, in API GET /api/v1/replenishment/suggestions removed the required property `requestId` from the response with the `400` status [response-required-property-removed]. 
+```
+
+### JSON Schemas de eventos - contracts/schemas/
+
+```
+Schemas comparados: base=[ninguno] head=[replenishment-risk-detected.v1.schema.json, stock-reserved.v1.schema.json]
+COMPATIBLE replenishment-risk-detected.v1.schema.json (raiz): schema nuevo (sin linea base)
+COMPATIBLE stock-reserved.v1.schema.json (raiz): schema nuevo (sin linea base)
+
+Resultado: 0 cambio(s) incompatible(s).
+```
+
+**Veredicto: COMPATIBLE** (ningun cambio incompatible en v1).
 <!-- compat-report:end -->
